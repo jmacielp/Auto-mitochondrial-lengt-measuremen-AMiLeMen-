@@ -1,18 +1,6 @@
-# -*- coding: utf-8 -*-
 """
-Analizador de Mitocondrias - Python puro
-Autor: Juan Ignacio Maciel Paccini
-
-Correr desde consola:
-    python mito_analyzer.py
-
-O doble click en mito_analyzer.bat
-
-Modos:
-  1. Prediccion  : analiza CZIs nuevos usando el perfil ya aprendido
-  2. Entrenamiento: refina el perfil superponiendo CZIs con sus ROIs manuales
+Analizador de Mitocondrias - CODIGO DE JUAN IGNACIO MACIEL PACCINI
 """
-
 import os
 import re
 import csv
