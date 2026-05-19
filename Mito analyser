@@ -1020,18 +1020,27 @@ class App(tk.Tk):
         if ruta:
             var.set(ruta)
 
+    def _archivo_perfil(self, var):
+        ruta = filedialog.askopenfilename(
+            title="Seleccionar perfil",
+            filetypes=[("JSON", "*.json"), ("Todos", "*.*")],
+        )
+        if ruta:
+            var.set(ruta)
+
     def _construir_ui(self):
         pad = {"padx": 8, "pady": 4}
 
         # --- Carpetas ---
-        frame_carpetas = ttk.LabelFrame(self, text="Carpetas", padding=8)
+        frame_carpetas = ttk.LabelFrame(self, text="Carpetas y perfil", padding=8)
         frame_carpetas.grid(row=0, column=0, sticky="ew", **pad)
 
-        base = r"C:\Users\JIMac\OneDrive\Escritorio\Analisis"
-        self.v_czi      = tk.StringVar(value=os.path.join(base, "TODOSLOSCZI"))
-        self.v_roi      = tk.StringVar(value=os.path.join(base, "Todos_los_roi_medidos"))
-        self.v_salida   = tk.StringVar(value=os.path.join(base, "Resultados"))
+        self.v_czi      = tk.StringVar(value="")
+        self.v_roi      = tk.StringVar(value="")
+        self.v_salida   = tk.StringVar(value="")
+        self.v_perfil   = tk.StringVar(value="")
 
+        # Carpetas CZI, ROI, Salida
         for i, (etiq, var) in enumerate([
             ("Carpeta CZI:",         self.v_czi),
             ("Carpeta ROIs (zips):", self.v_roi),
@@ -1041,6 +1050,19 @@ class App(tk.Tk):
             ttk.Entry(frame_carpetas, textvariable=var, width=55).grid(row=i, column=1)
             ttk.Button(frame_carpetas, text="...",
                        command=lambda v=var: self._carpeta(v)).grid(row=i, column=2)
+
+        # Separador visual
+        ttk.Separator(frame_carpetas, orient="horizontal").grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=4)
+
+        # Selector de perfil
+        ttk.Label(frame_carpetas, text="Perfil (.json):").grid(row=4, column=0, sticky="w")
+        ttk.Entry(frame_carpetas, textvariable=self.v_perfil, width=55).grid(row=4, column=1)
+        ttk.Button(frame_carpetas, text="...",
+                   command=lambda: self._archivo_perfil(self.v_perfil)).grid(row=4, column=2)
+        ttk.Label(frame_carpetas,
+                  text="(en Entrenamiento se guarda aqui el perfil nuevo)",
+                  foreground="gray").grid(row=5, column=1, sticky="w")
 
         # --- Parametros ---
         frame_params = ttk.LabelFrame(self, text="Parametros de clasificacion", padding=8)
@@ -1165,34 +1187,46 @@ class App(tk.Tk):
         self.log_txt.delete("1.0", "end")
         self.log_txt.config(state="disabled")
 
-        carpeta_czi  = self.v_czi.get()
-        carpeta_roi  = self.v_roi.get()
-        carpeta_out  = self.v_salida.get()
+        carpeta_czi      = self.v_czi.get()
+        carpeta_roi      = self.v_roi.get()
+        carpeta_out_base = self.v_salida.get()
         min_area     = 0.0   # ya no se usa, prediccion usa peak_local_max
         max_area     = 9999.0
         n_sigma      = self.v_n_sigma.get()
         modo         = self.v_modo.get()
         revision     = self.v_revision.get()
 
-        ruta_perfil    = os.path.join(carpeta_out, "perfil_mitocondrias.json")
+        # Subcarpeta con fecha y hora para no sobreescribir corridas anteriores
+        import datetime
+        timestamp   = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        carpeta_out = os.path.join(carpeta_out_base, "{}_{}".format(timestamp, modo))
+        os.makedirs(carpeta_out, exist_ok=True)
+        self._log("Carpeta de salida: {}".format(carpeta_out))
+
+        ruta_perfil     = self.v_perfil.get().strip()
+        if not ruta_perfil:
+            ruta_perfil = os.path.join(carpeta_out_base, "perfil_mitocondrias.json")
         ruta_csv_manual = os.path.join(carpeta_out, "mediciones_manuales.csv")
         ruta_csv_auto   = os.path.join(carpeta_out, "mediciones_automaticas.csv")
         ruta_csv_comp   = os.path.join(carpeta_out, "comparacion.csv")
-        os.makedirs(carpeta_out, exist_ok=True)
+        # Asegurar que la carpeta del perfil exista (por si guardamos uno nuevo)
+        os.makedirs(os.path.dirname(os.path.abspath(ruta_perfil)), exist_ok=True)
 
         # Cargar perfil
         perfil = {}
         if os.path.exists(ruta_perfil):
             perfil = cargar_perfil(ruta_perfil)
-            self._log("Perfil cargado ({} features, n={}):".format(
+            self._log("Perfil cargado: {}".format(ruta_perfil))
+            self._log("  ({} features, n={})".format(
                 len(perfil), sum(v.get("n", 0) for v in perfil.values())))
             for k, v in sorted(perfil.items()):
                 self._log("  {:12s}: {:.4f} ± {:.4f}".format(
                     k, v["media"], v["sd"]))
         elif modo == "prediccion":
             messagebox.showerror("Error",
-                "No se encontro perfil_mitocondrias.json en:\n" + carpeta_out +
-                "\n\nCopia el archivo ahi o usa modo Entrenamiento primero.")
+                "No se encontro el perfil en:\n{}\n\n"
+                "Selecciona un perfil valido con el boton '...' junto a 'Perfil (.json)'\n"
+                "o usa modo Entrenamiento para generar uno nuevo.".format(ruta_perfil))
             return
 
         # Listar CZIs
@@ -1266,7 +1300,7 @@ class App(tk.Tk):
                     k, v["media"], v["sd"], v["n"]))
             exportar_csv(todas_mediciones, ruta_csv_auto)
 
-        else:
+        else:https://github.com/jmacielp/Auto-mitochondrial-lengt-measuremen-AMiLeMen-/blob/main/Mito%20analyser
             exportar_csv(todas_mediciones, ruta_csv_auto)
 
         # Comparacion automatica si existen ambos archivos
