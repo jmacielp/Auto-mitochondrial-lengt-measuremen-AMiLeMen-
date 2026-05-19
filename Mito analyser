@@ -1182,6 +1182,66 @@ class App(tk.Tk):
         except Exception as e:
             self._log("  AVISO: no se pudo generar comparacion: " + str(e))
 
+    def _guardar_perfil_con_dialogo(self, perfil, ruta_perfil_base, timestamp):
+        """Pregunta al usuario si desea guardar el perfil y con qué nombre."""
+        guardar = messagebox.askyesno(
+            "Guardar perfil",
+            "Se generó un perfil nuevo.\n¿Querés guardarlo?"
+        )
+        if not guardar:
+            self._log("  Perfil no guardado.")
+            return
+
+        # Ventana para ingresar el nombre
+        dialogo = tk.Toplevel(self)
+        dialogo.title("Nombre del perfil")
+        dialogo.resizable(False, False)
+        dialogo.grab_set()
+
+        ttk.Label(dialogo, text="Nombre del perfil:",
+                  padding=(12, 12, 12, 4)).pack(anchor="w")
+
+        nombre_var = tk.StringVar(value="perfil_{}".format(timestamp))
+        entry = ttk.Entry(dialogo, textvariable=nombre_var, width=40)
+        entry.pack(padx=12, pady=4)
+        entry.select_range(0, "end")
+        entry.focus()
+
+        ttk.Label(dialogo, text="(se guardará como <nombre>.json)",
+                  foreground="gray", padding=(12, 0, 12, 8)).pack(anchor="w")
+
+        resultado = {"ok": False}
+
+        def confirmar(event=None):
+            resultado["ok"] = True
+            dialogo.destroy()
+
+        def cancelar():
+            dialogo.destroy()
+
+        btns = ttk.Frame(dialogo)
+        btns.pack(pady=(0, 10))
+        ttk.Button(btns, text="Guardar", command=confirmar).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancelar", command=cancelar).pack(side="left", padx=6)
+        entry.bind("<Return>", confirmar)
+
+        dialogo.wait_window()
+
+        if not resultado["ok"]:
+            self._log("  Perfil no guardado.")
+            return
+
+        nombre = nombre_var.get().strip()
+        if not nombre:
+            nombre = "perfil_{}".format(timestamp)
+        if not nombre.endswith(".json"):
+            nombre += ".json"
+
+        carpeta_perfil = os.path.dirname(os.path.abspath(ruta_perfil_base))
+        ruta_final = os.path.join(carpeta_perfil, nombre)
+        guardar_perfil(perfil, ruta_final)
+        self._log("  Perfil guardado: {}".format(ruta_final))
+
     def _iniciar(self):
         self.log_txt.config(state="normal")
         self.log_txt.delete("1.0", "end")
@@ -1283,30 +1343,20 @@ class App(tk.Tk):
         # Post-procesamiento
         if modo == "entrenamiento" and todas_mediciones:
             perfil_nuevo = construir_perfil(todas_mediciones)
-            # Guardar con timestamp para no sobreescribir perfiles anteriores
-            carpeta_perfil = os.path.dirname(os.path.abspath(ruta_perfil))
-            ruta_perfil_nuevo = os.path.join(
-                carpeta_perfil, "perfil_{}.json".format(timestamp))
-            guardar_perfil(perfil_nuevo, ruta_perfil_nuevo)
-            self._log("\n=== PERFIL GUARDADO ===")
-            self._log("  {}".format(ruta_perfil_nuevo))
+            self._log("\n=== PERFIL NUEVO ===")
             for k, v in sorted(perfil_nuevo.items()):
                 self._log("  {:12s}: {:.4f} +- {:.4f}  (n={})".format(
                     k, v["media"], v["sd"], v["n"]))
+            self._guardar_perfil_con_dialogo(perfil_nuevo, ruta_perfil, timestamp)
             exportar_csv(todas_mediciones, ruta_csv_manual)
 
         elif aprendizaje_activo and meds_corregidas:
-            # Guardar perfil mejorado por revision manual en prediccion (con timestamp)
-            carpeta_perfil = os.path.dirname(os.path.abspath(ruta_perfil))
-            ruta_perfil_nuevo = os.path.join(
-                carpeta_perfil, "perfil_{}.json".format(timestamp))
-            guardar_perfil(perfil, ruta_perfil_nuevo)
-            self._log("\n=== PERFIL GUARDADO (aprendizaje activo, n={}) ===".format(
+            self._log("\n=== PERFIL ACTUALIZADO (aprendizaje activo, n={}) ===".format(
                 len(meds_corregidas)))
-            self._log("  {}".format(ruta_perfil_nuevo))
             for k, v in sorted(perfil.items()):
                 self._log("  {:12s}: {:.4f} +- {:.4f}  (n={})".format(
                     k, v["media"], v["sd"], v["n"]))
+            self._guardar_perfil_con_dialogo(perfil, ruta_perfil, timestamp)
             exportar_csv(todas_mediciones, ruta_csv_auto)
 
         else:
