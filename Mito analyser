@@ -1283,24 +1283,33 @@ class App(tk.Tk):
         # Post-procesamiento
         if modo == "entrenamiento" and todas_mediciones:
             perfil_nuevo = construir_perfil(todas_mediciones)
-            guardar_perfil(perfil_nuevo, ruta_perfil)
-            self._log("\n=== PERFIL ACTUALIZADO (entrenamiento) ===")
+            # Guardar con timestamp para no sobreescribir perfiles anteriores
+            carpeta_perfil = os.path.dirname(os.path.abspath(ruta_perfil))
+            ruta_perfil_nuevo = os.path.join(
+                carpeta_perfil, "perfil_{}.json".format(timestamp))
+            guardar_perfil(perfil_nuevo, ruta_perfil_nuevo)
+            self._log("\n=== PERFIL GUARDADO ===")
+            self._log("  {}".format(ruta_perfil_nuevo))
             for k, v in sorted(perfil_nuevo.items()):
                 self._log("  {:12s}: {:.4f} +- {:.4f}  (n={})".format(
                     k, v["media"], v["sd"], v["n"]))
             exportar_csv(todas_mediciones, ruta_csv_manual)
 
         elif aprendizaje_activo and meds_corregidas:
-            # Guardar perfil mejorado por revision manual en prediccion
-            guardar_perfil(perfil, ruta_perfil)
+            # Guardar perfil mejorado por revision manual en prediccion (con timestamp)
+            carpeta_perfil = os.path.dirname(os.path.abspath(ruta_perfil))
+            ruta_perfil_nuevo = os.path.join(
+                carpeta_perfil, "perfil_{}.json".format(timestamp))
+            guardar_perfil(perfil, ruta_perfil_nuevo)
             self._log("\n=== PERFIL GUARDADO (aprendizaje activo, n={}) ===".format(
                 len(meds_corregidas)))
+            self._log("  {}".format(ruta_perfil_nuevo))
             for k, v in sorted(perfil.items()):
                 self._log("  {:12s}: {:.4f} +- {:.4f}  (n={})".format(
                     k, v["media"], v["sd"], v["n"]))
             exportar_csv(todas_mediciones, ruta_csv_auto)
 
-        else:https://github.com/jmacielp/Auto-mitochondrial-lengt-measuremen-AMiLeMen-/blob/main/Mito%20analyser
+        else:
             exportar_csv(todas_mediciones, ruta_csv_auto)
 
         # Comparacion automatica si existen ambos archivos
