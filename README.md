@@ -1,34 +1,69 @@
-AMiLeMen — Auto Mitochondrial Length Measurement
-The idea is simple: drop one or more .czi files into a folder, and the program automatically detects and measures all the mitochondria in them.
+# AMiLeMen — Auto Mitochondrial Length Measurement
 
-I trained it using my own pre-existing measurements, but I'd love to turn this into a collaborative repository — a place where people can contribute their own measurements, discuss methods, and make this kind of analysis more open and transparent.
+> Automatic detection and measurement of mitochondria in Zeiss `.czi` confocal images.
 
-How it works
-.czi → picks the sharpest frame → automatic detection → an overlay pops up so you can remove false positives or add missed ones by hand → those corrections keep refining the model over time.
+Drop one or more `.czi` files into a folder — the program finds every mitochondrion, measures it, and exports the results. No Fiji macros, no manual clicking through hundreds of images.
 
-What you need
-Training mode — teach the program what a mitochondrion looks like:
+I built this on top of my own hand-drawn ROI measurements, but the goal is to make it collaborative: a shared space where researchers can pool measurements, refine the model together, and make this kind of analysis more open and reproducible.
 
-A folder with .czi files
-A folder with .zip files (Fiji ROI Manager exports) with your manually drawn line ROIs
-Prediction mode — just measure:
+---
+## How it works
+```
+.czi → pick sharpest frame → detect candidates → filter by learned profile
+     → overlay for manual correction → profile refines with each correction
+```
 
-A folder with .czi files
-A trained profile (perfil_mitocondrias.json)
-Output structure
-Each run creates a timestamped subfolder so nothing gets overwritten:
+Green lines = automatic detections. Red lines = your reference ROIs.
+You remove false positives, add missed ones — every correction makes the next run better.
 
+---
+## Modes
+
+**Training** — teach the program what a mitochondrion looks like:
+- A folder of `.czi` files
+- A folder of `.zip` files (Fiji ROI Manager exports) with hand-drawn line ROIs
+
+**Prediction** — just measure:
+- A folder of `.czi` files
+- A trained profile (`perfil_mitocondrias.json`)
+
+Enable **Manual Review** in prediction mode to correct detections image by image and actively refine the profile as you go.
+
+---
+
+## Output
+
+Each run creates a timestamped subfolder — nothing ever gets overwritten:
+
+```
 Results/
 └── 2026-05-19_14-30-00_prediction/
-    ├── overlays/               # RGB images with detected lines drawn on top
-    ├── sharp_frames/           # sharpest frame extracted from each CZI
-    ├── detected_rois/          # detections exported in Fiji ROI format
+    ├── overlays/                  # RGB images with lines drawn on top
+    ├── sharp_frames/              # sharpest frame from each CZI
+    ├── detected_rois/             # detections in Fiji ROI format
     └── automatic_measurements.csv
-Requirements
+```
+
+---
+
+## Requirements
+
+```bash
 pip install numpy scipy scikit-image tifffile pillow czifile matplotlib
-Python 3.9 or higher. Double-click ejecutar.bat to launch, or run:
+```
 
+Python 3.9+. Launch by double-clicking `ejecutar.bat`, or:
+
+```bash
 python mito_analyzer.py
-Note
-I'm not a professional programmer — I do this because I find it genuinely fun (even when it's frustrating). Any feedback, contributions or comments are very welcome, as long as we keep it respectful. 😊
+```
 
+---
+
+## Contributing
+
+If you work with mitochondrial imaging and want to contribute your own measurements to help improve the shared profile, you're very welcome. Open an issue, start a discussion, or submit a pull request.
+
+---
+
+*Not a professional programmer — just someone who finds this genuinely fun (even when it's frustrating). Be kind. 😊*
