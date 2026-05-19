@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 """
-Analizador de Mitocondrias - Python puro
+Analizador de Mitocondrias 
 Autor: Juan Ignacio Maciel Paccini
 
 Correr desde consola:
@@ -685,180 +684,250 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
 class VentanaRevision(tk.Toplevel):
     """
     Ventana modal para revisar las lineas detectadas en una imagen.
+    Usa matplotlib embebido en tkinter para renderizado eficiente.
+
     Verde  = lineas detectadas/entrenadas (editables).
     Rojo   = ROIs manuales de referencia (solo lectura).
-    Controles:
-      Rueda del raton     -> zoom centrado en el cursor
-      Click izquierdo     -> seleccionar linea verde mas cercana (amarillo)
-      Tecla Delete        -> borrar linea seleccionada
-      Arrastrar boton der -> dibujar nueva linea (cian mientras se dibuja)
-      Confirmar           -> acepta los cambios y re-mide
-      Saltar              -> descarta cambios, usa lineas originales
+
+    Modos:
+      Seleccionar (default): click sobre linea verde -> selecciona (amarillo).
+                             Supr borra la seleccionada.
+      Nueva linea [N]: 1er click = punto A, mover mouse = preview,
+                       2do click = confirma. Esc cancela.
+    Zoom: rueda del raton centrado en el cursor.
     """
 
-    UMBRAL_SEL_PX = 8   # pixeles de pantalla para seleccionar una linea
+    UMBRAL_PX = 8  # pixeles de pantalla para seleccionar una linea
 
     def __init__(self, parent, frame_2d, lineas_verdes, lineas_rojas, escala, titulo=""):
         super().__init__(parent)
         self.title(titulo or "Revision manual")
         self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._saltar)
 
-        self._frame    = frame_2d
-        self._verdes   = list(lineas_verdes)    # [(x1,y1,x2,y2), ...]
-        self._rojas    = list(lineas_rojas)     # [{"x1":..,"y1":..,"x2":..,"y2":..}, ...]
-        self._escala   = escala
-
+        self._frame        = frame_2d
+        self._verdes       = list(lineas_verdes)
+        self._rojas        = list(lineas_rojas)
+        self._escala       = escala
         self._confirmado   = False
-        self._zoom         = 1.0
-        self._off_x        = 0
-        self._off_y        = 0
-        self._seleccionada = None   # indice en self._verdes
-        self._drag_start   = None
-        self._drag_end     = None
-        self._photo        = None   # mantener referencia para tkinter
+        self._modo_dibujo  = False
+        self._pto_a        = None
+        self._seleccionada = None
+        self._lineas_ax    = []   # Line2D por cada linea verde
 
         self._construir_ui()
-        self._render()
         self.wait_window()
 
     # ------------------------------------------------------------------
     def _construir_ui(self):
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        # Barra de herramientas
+        barra = ttk.Frame(self)
+        barra.pack(fill="x", padx=4, pady=(4, 0))
+
+        self._btn_nueva = ttk.Button(barra, text="Nueva linea  [N]",
+                                     command=self._activar_dibujo)
+        self._btn_nueva.pack(side="left", padx=(0, 6))
+        ttk.Button(barra, text="Borrar  [Supr]",
+                   command=self._on_delete).pack(side="left", padx=(0, 6))
+        self._lbl_modo = ttk.Label(barra, text="Seleccionar", foreground="gray")
+        self._lbl_modo.pack(side="left", padx=8)
+
+        # Figura matplotlib
         h, w = self._frame.shape
-        cw = min(w, 960)
-        ch = min(h, 720)
-
-        ttk.Label(self,
-                  text="Verde=detectadas | Rojo=ROI referencia | "
-                       "Click izq: seleccionar | Supr: borrar | "
-                       "Arrastrar der: nueva linea | Rueda: zoom",
-                  foreground="gray").pack(padx=4, pady=(4, 0))
-
-        self._canvas = tk.Canvas(self, width=cw, height=ch, bg="black",
-                                 cursor="crosshair")
-        self._canvas.pack(padx=4, pady=4)
-
-        frame_btns = ttk.Frame(self)
-        frame_btns.pack(fill="x", padx=4, pady=(0, 4))
-        ttk.Button(frame_btns, text="Confirmar", command=self._confirmar).pack(side="left", padx=4)
-        ttk.Button(frame_btns, text="Saltar",    command=self._saltar   ).pack(side="left", padx=4)
-
-        c = self._canvas
-        c.bind("<MouseWheel>",       self._on_zoom)
-        c.bind("<Button-1>",         self._on_click)
-        c.bind("<Button-3>",         self._on_drag_start)
-        c.bind("<B3-Motion>",        self._on_drag_move)
-        c.bind("<ButtonRelease-3>",  self._on_drag_end)
-        self.bind("<Delete>",        self._on_delete)
-        self.bind("<BackSpace>",     self._on_delete)
-
-    # ------------------------------------------------------------------
-    def _img_to_canvas(self, x, y):
-        return x * self._zoom + self._off_x, y * self._zoom + self._off_y
-
-    def _canvas_to_img(self, cx, cy):
-        return (cx - self._off_x) / self._zoom, (cy - self._off_y) / self._zoom
-
-    # ------------------------------------------------------------------
-    def _render(self):
-        from PIL import Image, ImageDraw, ImageTk
+        dpi = 96
+        fw = max(6.0, min(w / dpi, 11.0))
+        fh = max(5.0, min(h / dpi,  9.0))
+        self._fig = Figure(figsize=(fw, fh), dpi=dpi)
+        self._ax  = self._fig.add_axes([0, 0, 1, 1])
+        self._ax.axis("off")
 
         f32 = self._frame.astype(np.float32)
         f32 = (f32 - f32.min()) / (f32.max() - f32.min() + 1e-9)
-        img8 = (f32 * 255).astype(np.uint8)
-        pil = Image.fromarray(np.stack([img8, img8, img8], axis=-1), mode="RGB")
-        draw = ImageDraw.Draw(pil)
+        self._ax.imshow(f32, cmap="gray", vmin=0, vmax=1, origin="upper",
+                        aspect="equal")
 
-        # Lineas rojas (referencia, solo lectura)
+        # Lineas rojas (referencia)
         for roi in self._rojas:
-            draw.line([(roi["x1"], roi["y1"]), (roi["x2"], roi["y2"])],
-                      fill=(255, 50, 50), width=2)
+            self._ax.plot([roi["x1"], roi["x2"]], [roi["y1"], roi["y2"]],
+                          color="red", linewidth=1.5)
 
         # Lineas verdes (editables)
-        for i, (x1, y1, x2, y2) in enumerate(self._verdes):
-            color = (255, 220, 0) if i == self._seleccionada else (0, 255, 0)
-            draw.line([(x1, y1), (x2, y2)], fill=color, width=2)
+        self._lineas_ax = []
+        for (x1, y1, x2, y2) in self._verdes:
+            ln, = self._ax.plot([x1, x2], [y1, y2], color="lime", linewidth=2)
+            self._lineas_ax.append(ln)
 
-        # Linea que se esta dibujando (cian)
-        if self._drag_start and self._drag_end:
-            draw.line([self._drag_start, self._drag_end], fill=(0, 200, 255), width=2)
+        # Linea y punto de preview (invisibles hasta usar modo dibujo)
+        self._ln_prev, = self._ax.plot([], [], color="cyan", linewidth=1.5,
+                                        linestyle="--")
+        self._mk_prev, = self._ax.plot([], [], "o", color="cyan", markersize=5)
 
-        # Aplicar zoom
-        h, w = self._frame.shape
-        nw = max(1, int(w * self._zoom))
-        nh = max(1, int(h * self._zoom))
-        pil = pil.resize((nw, nh), Image.NEAREST)
+        # Canvas tkinter
+        self._cv = FigureCanvasTkAgg(self._fig, self)
+        self._cv.draw()
+        self._cv.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
 
-        self._photo = ImageTk.PhotoImage(pil)
-        self._canvas.delete("all")
-        self._canvas.create_image(self._off_x, self._off_y, anchor="nw",
-                                  image=self._photo)
+        # Botones inferiores
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=4, pady=(0, 4))
+        ttk.Button(btns, text="Confirmar", command=self._confirmar).pack(side="left", padx=4)
+        ttk.Button(btns, text="Saltar",    command=self._saltar   ).pack(side="left", padx=4)
+        ttk.Label(btns, text="Verde=detectadas | Rojo=referencia | Rueda=zoom",
+                  foreground="gray").pack(side="left", padx=12)
+
+        # Eventos matplotlib
+        self._fig.canvas.mpl_connect("motion_notify_event", self._on_move)
+        self._fig.canvas.mpl_connect("button_press_event",  self._on_click_mpl)
+        self._fig.canvas.mpl_connect("scroll_event",        self._on_scroll)
+
+        # Teclas tkinter
+        self.bind("<Delete>",    self._on_delete)
+        self.bind("<BackSpace>", self._on_delete)
+        self.bind("<Escape>",    self._on_escape)
+        self.bind("<n>",         lambda e: self._activar_dibujo())
+        self.bind("<N>",         lambda e: self._activar_dibujo())
 
     # ------------------------------------------------------------------
-    def _on_zoom(self, event):
-        factor = 1.15 if event.delta > 0 else 1.0 / 1.15
-        cx, cy = event.x, event.y
-        self._off_x = cx - (cx - self._off_x) * factor
-        self._off_y = cy - (cy - self._off_y) * factor
-        self._zoom = max(0.1, min(15.0, self._zoom * factor))
-        self._render()
+    def _activar_dibujo(self):
+        # Deseleccionar linea activa
+        if self._seleccionada is not None:
+            self._lineas_ax[self._seleccionada].set_color("lime")
+            self._seleccionada = None
+        self._modo_dibujo = True
+        self._pto_a = None
+        self._lbl_modo.config(text="Nueva linea — click en punto A", foreground="#0088ff")
+        try:
+            self._btn_nueva.state(["pressed"])
+        except Exception:
+            pass
+        self._fig.canvas.draw_idle()
+
+    def _desactivar_dibujo(self):
+        self._modo_dibujo = False
+        self._pto_a = None
+        self._ln_prev.set_xdata([])
+        self._ln_prev.set_ydata([])
+        self._mk_prev.set_xdata([])
+        self._mk_prev.set_ydata([])
+        self._lbl_modo.config(text="Seleccionar", foreground="gray")
+        try:
+            self._btn_nueva.state(["!pressed"])
+        except Exception:
+            pass
+        self._fig.canvas.draw_idle()
 
     # ------------------------------------------------------------------
-    @staticmethod
-    def _dist_pt_seg(px, py, x1, y1, x2, y2):
-        dx, dy = x2 - x1, y2 - y1
-        if dx == 0 and dy == 0:
-            return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-        t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
-        return math.sqrt((px - (x1 + t * dx)) ** 2 + (py - (y1 + t * dy)) ** 2)
+    def _on_move(self, event):
+        if not self._modo_dibujo or event.inaxes != self._ax:
+            return
+        if event.xdata is None:
+            return
+        if self._pto_a is not None:
+            ax, ay = self._pto_a
+            self._ln_prev.set_xdata([ax, event.xdata])
+            self._ln_prev.set_ydata([ay, event.ydata])
+            self._fig.canvas.draw_idle()
 
-    def _on_click(self, event):
-        ix, iy = self._canvas_to_img(event.x, event.y)
-        umbral = self.UMBRAL_SEL_PX / self._zoom
-        mejor, mejor_d = None, umbral
+    def _on_click_mpl(self, event):
+        if event.inaxes != self._ax or event.xdata is None or event.button != 1:
+            return
+
+        if self._modo_dibujo:
+            if self._pto_a is None:
+                # Primer click: fijar punto A
+                self._pto_a = (event.xdata, event.ydata)
+                self._mk_prev.set_xdata([event.xdata])
+                self._mk_prev.set_ydata([event.ydata])
+                self._lbl_modo.config(
+                    text="Nueva linea — click en punto B  |  Esc=cancelar")
+                self._fig.canvas.draw_idle()
+            else:
+                # Segundo click: confirmar linea
+                ax, ay = self._pto_a
+                bx, by = event.xdata, event.ydata
+                if math.sqrt((bx - ax) ** 2 + (by - ay) ** 2) > 1:
+                    self._verdes.append((ax, ay, bx, by))
+                    ln, = self._ax.plot([ax, bx], [ay, by],
+                                        color="lime", linewidth=2)
+                    self._lineas_ax.append(ln)
+                self._desactivar_dibujo()
+            return
+
+        # Modo seleccionar: buscar linea verde mas cercana en pixeles de pantalla
+        mejor, mejor_d = None, float("inf")
         for i, (x1, y1, x2, y2) in enumerate(self._verdes):
-            d = self._dist_pt_seg(ix, iy, x1, y1, x2, y2)
+            d = self._dist_px(event.xdata, event.ydata, x1, y1, x2, y2)
             if d < mejor_d:
                 mejor_d, mejor = d, i
-        self._seleccionada = None if mejor == self._seleccionada else mejor
-        self._render()
 
+        # Restaurar color anterior
+        if self._seleccionada is not None:
+            self._lineas_ax[self._seleccionada].set_color("lime")
+
+        if mejor is not None and mejor_d < self.UMBRAL_PX:
+            self._seleccionada = None if mejor == self._seleccionada else mejor
+            if self._seleccionada is not None:
+                self._lineas_ax[self._seleccionada].set_color("yellow")
+        else:
+            self._seleccionada = None
+
+        self._fig.canvas.draw_idle()
+
+    def _on_scroll(self, event):
+        factor = 1.15 if event.step > 0 else 1.0 / 1.15
+        if event.xdata is None:
+            return
+        xc, yc = event.xdata, event.ydata
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        self._ax.set_xlim([xc + (x - xc) / factor for x in xlim])
+        self._ax.set_ylim([yc + (y - yc) / factor for y in ylim])
+        self._fig.canvas.draw_idle()
+
+    def _dist_px(self, mx, my, x1, y1, x2, y2):
+        """Distancia en pixels de pantalla del punto (mx,my) al segmento."""
+        t = self._ax.transData
+        mx_p, my_p = t.transform((mx, my))
+        x1_p, y1_p = t.transform((x1, y1))
+        x2_p, y2_p = t.transform((x2, y2))
+        dx, dy = x2_p - x1_p, y2_p - y1_p
+        if dx == 0 and dy == 0:
+            return math.sqrt((mx_p - x1_p) ** 2 + (my_p - y1_p) ** 2)
+        s = max(0.0, min(1.0, ((mx_p - x1_p) * dx + (my_p - y1_p) * dy)
+                               / (dx * dx + dy * dy)))
+        return math.sqrt((mx_p - (x1_p + s * dx)) ** 2
+                         + (my_p - (y1_p + s * dy)) ** 2)
+
+    # ------------------------------------------------------------------
     def _on_delete(self, event=None):
         if self._seleccionada is not None:
-            del self._verdes[self._seleccionada]
+            idx = self._seleccionada
+            self._lineas_ax[idx].remove()
+            del self._lineas_ax[idx]
+            del self._verdes[idx]
             self._seleccionada = None
-            self._render()
+            self._fig.canvas.draw_idle()
 
-    def _on_drag_start(self, event):
-        ix, iy = self._canvas_to_img(event.x, event.y)
-        self._drag_start = (ix, iy)
-        self._drag_end   = (ix, iy)
-
-    def _on_drag_move(self, event):
-        if self._drag_start:
-            self._drag_end = self._canvas_to_img(event.x, event.y)
-            self._render()
-
-    def _on_drag_end(self, event):
-        if self._drag_start and self._drag_end:
-            x1, y1 = self._drag_start
-            x2, y2 = self._drag_end
-            if math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) > 3:
-                self._verdes.append((x1, y1, x2, y2))
-        self._drag_start = self._drag_end = None
-        self._render()
+    def _on_escape(self, event=None):
+        if self._modo_dibujo:
+            self._desactivar_dibujo()
 
     # ------------------------------------------------------------------
     def _confirmar(self):
         self._confirmado = True
+        self._fig.clf()
         self.destroy()
 
     def _saltar(self):
         self._confirmado = False
+        self._fig.clf()
         self.destroy()
 
     @property
     def lineas_finales(self):
-        """Devuelve la lista de lineas tras la edicion, o None si se salto."""
         return self._verdes if self._confirmado else None
 
 
@@ -1066,7 +1135,9 @@ class App(tk.Tk):
             messagebox.showwarning("Aviso", "No se encontraron archivos .czi en:\n" + carpeta_czi)
             return
 
-        todas_mediciones = []
+        todas_mediciones   = []
+        meds_corregidas    = []   # acumulado de mediciones validadas por el usuario
+        aprendizaje_activo = (modo == "prediccion" and revision)
 
         for archivo in czis:
             numero = extraer_numero(archivo)
@@ -1086,6 +1157,19 @@ class App(tk.Tk):
                     app_root=self,
                 )
                 todas_mediciones.extend(meds)
+
+                # Aprendizaje activo: actualizar perfil tras cada imagen revisada
+                if aprendizaje_activo and meds:
+                    meds_corregidas.extend(meds)
+                    perfil_nuevo = construir_perfil(meds_corregidas)
+                    if perfil_nuevo:
+                        perfil = perfil_nuevo
+                        self._log("  Perfil actualizado con {} mediciones corregidas acumuladas".format(
+                            len(meds_corregidas)))
+                        for k, v in sorted(perfil.items()):
+                            self._log("    {:12s}: {:.4f} +- {:.4f}".format(
+                                k, v["media"], v["sd"]))
+
             except Exception:
                 self._log("  ERROR procesando {}: {}".format(archivo, traceback.format_exc()))
 
@@ -1093,11 +1177,22 @@ class App(tk.Tk):
         if modo == "entrenamiento" and todas_mediciones:
             perfil_nuevo = construir_perfil(todas_mediciones)
             guardar_perfil(perfil_nuevo, ruta_perfil)
-            self._log("\n=== PERFIL ACTUALIZADO ===")
+            self._log("\n=== PERFIL ACTUALIZADO (entrenamiento) ===")
             for k, v in sorted(perfil_nuevo.items()):
-                self._log("  {:12s}: {:.4f} ± {:.4f}  (n={})".format(
+                self._log("  {:12s}: {:.4f} +- {:.4f}  (n={})".format(
                     k, v["media"], v["sd"], v["n"]))
             exportar_csv(todas_mediciones, ruta_csv_manual)
+
+        elif aprendizaje_activo and meds_corregidas:
+            # Guardar perfil mejorado por revision manual en prediccion
+            guardar_perfil(perfil, ruta_perfil)
+            self._log("\n=== PERFIL GUARDADO (aprendizaje activo, n={}) ===".format(
+                len(meds_corregidas)))
+            for k, v in sorted(perfil.items()):
+                self._log("  {:12s}: {:.4f} +- {:.4f}  (n={})".format(
+                    k, v["media"], v["sd"], v["n"]))
+            exportar_csv(todas_mediciones, ruta_csv_auto)
+
         else:
             exportar_csv(todas_mediciones, ruta_csv_auto)
 
@@ -1111,12 +1206,14 @@ class App(tk.Tk):
         self._log("Resultados en: " + carpeta_out)
         self._log("\nOutputs:")
         self._log("  frames_nitidos/       -> TIFF de cada frame seleccionado")
-        self._log("  overlays/             -> TIFF con mitocondrias marcadas en verde")
+        self._log("  overlays/             -> TIFF con lineas de punta a punta")
         self._log("  rois_detectados/      -> ZIP de ROIs para abrir en Fiji")
         if modo == "entrenamiento":
             self._log("  mediciones_manuales.csv")
         else:
             self._log("  mediciones_automaticas.csv")
+        if aprendizaje_activo:
+            self._log("  perfil_mitocondrias.json  -> actualizado con correcciones manuales")
 
         messagebox.showinfo("Listo",
             "Analisis completado.\n{} mitocondrias procesadas.\n\nResultados en:\n{}".format(
