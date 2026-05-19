@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-Analizador de Mitocondrias 
+Analizador de Mitocondrias - Python puro
 Autor: Juan Ignacio Maciel Paccini
 
 Correr desde consola:
@@ -208,12 +209,11 @@ def segmentar_frame(frame_2d, min_area_px, max_area_px):
     return [p for p in props if min_area_px <= p.area <= max_area_px]
 
 
-def extraer_particula_en_roi(frame_2d, roi_linea, radio=35):
+def extraer_particula_en_roi(frame_2d, roi_linea, radio=20, threshold=None):
     """
     Extrae directamente la particula alrededor de una linea ROI.
-    Estrategia: tomar un parche centrado en la linea y encontrar
-    el componente conectado mas brillante dentro del parche.
-    Devuelve un regionprop o None.
+    threshold: umbral absoluto de intensidad (recomendado para frames normalizados).
+               Si es None usa percentil 85 del parche como fallback.
     """
     cx = int(round((roi_linea["x1"] + roi_linea["x2"]) / 2))
     cy = int(round((roi_linea["y1"] + roi_linea["y2"]) / 2))
@@ -229,8 +229,11 @@ def extraer_particula_en_roi(frame_2d, roi_linea, radio=35):
 
     parche = frame_2d[r1:r2, c1:c2].astype(np.float32)
 
-    # Threshold local dentro del parche: percentil 60 del parche
-    thresh = np.percentile(parche, 60)
+    # Usar umbral global si se pasa; sino percentil alto del parche
+    if threshold is not None:
+        thresh = float(threshold)
+    else:
+        thresh = float(np.percentile(parche, 85))
     bin_parche = parche > thresh
 
     bin_parche = morphology.remove_small_holes(bin_parche, area_threshold=4)
@@ -315,6 +318,20 @@ def features_region(prop, escala_um_px, frame_completo=None, offset=None):
         "rawintden": round(rawintden, 4),
         "length":    round(feret_um, 4),
     }
+
+
+def normalizar_frame(frame_2d, p_low=1, p_high=99):
+    """
+    Normaliza el frame a escala 0-65535 usando percentiles para que las
+    mediciones sean comparables entre imagenes con distinto brillo absoluto.
+    P_low -> 0, P_high -> 65535.
+    """
+    lo  = np.percentile(frame_2d, p_low)
+    hi  = np.percentile(frame_2d, p_high)
+    if hi <= lo:
+        return frame_2d.astype(np.float32)
+    normed = (frame_2d.astype(np.float32) - lo) / (hi - lo) * 65535.0
+    return np.clip(normed, 0.0, 65535.0).astype(np.float32)
 
 
 def medir_sobre_linea(frame_2d, x1, y1, x2, y2, escala_um_px, ancho=1):
@@ -578,7 +595,12 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
 
     frame = stack[t_mejor]
 
-    # Guardar TIFF del frame
+    # Normalizar frame para mediciones consistentes entre imagenes
+    frame_n = normalizar_frame(frame)
+    log_fn("  Normalizacion: [{:.0f}, {:.0f}] -> [0, 65535]".format(
+        frame.min(), frame.max()))
+
+    # Guardar TIFF del frame (sin normalizar, para visualizacion fiel)
     ruta_tif = os.path.join(carpeta_salida, "frames_nitidos",
                             nombre + "_frame{}.tif".format(t_mejor + 1))
     guardar_frame_tif(frame, ruta_tif)
@@ -594,7 +616,7 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
         log_fn("  ROIs manuales (lineas): {}".format(len(rois_lineas)))
 
         for roi in rois_lineas:
-            feat = medir_sobre_linea(frame,
+            feat = medir_sobre_linea(frame_n,
                                      roi["x1"], roi["y1"],
                                      roi["x2"], roi["y2"],
                                      escala)
@@ -610,11 +632,17 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
         # --- PREDICCION: maximos locales + eje mayor como linea ---
         from skimage.feature import peak_local_max
 
-        umbral_min = float(np.percentile(frame, 70))
+        # Umbral sobre frame normalizado: fondo + 2*SD del frame
+        # (mucho mas restrictivo que el simple percentil 70)
+        bg   = float(np.median(frame_n))
+        sg   = float(np.std(frame_n))
+        umbral_min = float(max(np.percentile(frame_n, 80), bg + 2.0 * sg))
+        log_fn("  Umbral deteccion: {:.0f}  (fondo={:.0f}, SD={:.0f})".format(
+            umbral_min, bg, sg))
         dist_min = 18
 
         coords = peak_local_max(
-            frame,
+            frame_n,
             min_distance=dist_min,
             threshold_abs=umbral_min,
         )
@@ -624,7 +652,8 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
         for (cy, cx) in coords:
             roi_seed = {"x1": float(cx), "y1": float(cy),
                         "x2": float(cx), "y2": float(cy)}
-            resultado = extraer_particula_en_roi(frame, roi_seed)
+            resultado = extraer_particula_en_roi(frame_n, roi_seed,
+                                                 threshold=umbral_min)
             if resultado is None:
                 continue
             prop_p, parche, (r1, c1) = resultado
@@ -636,7 +665,7 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
             vistos.add(key)
 
             vx1, vy1, vx2, vy2 = endpoints_eje_mayor(prop_p, r1, c1)
-            feat = medir_sobre_linea(frame, vx1, vy1, vx2, vy2, escala)
+            feat = medir_sobre_linea(frame_n, vx1, vy1, vx2, vy2, escala)
             if feat is None:
                 continue
 
@@ -662,7 +691,7 @@ def procesar_imagen(ruta_czi, ruta_roi_zip, carpeta_salida,
         if lineas_finales is not None:
             mediciones = []
             for (x1, y1, x2, y2) in lineas_finales:
-                feat = medir_sobre_linea(frame, x1, y1, x2, y2, escala)
+                feat = medir_sobre_linea(frame_n, x1, y1, x2, y2, escala)
                 if feat is not None:
                     feat["imagen"] = numero
                     mediciones.append(feat)
@@ -714,6 +743,9 @@ class VentanaRevision(tk.Toplevel):
         self._pto_a        = None
         self._seleccionada = None
         self._lineas_ax    = []   # Line2D por cada linea verde
+        self._space_held   = False
+        self._panning      = False
+        self._pan_px       = None  # (x, y) en pixels de pantalla
 
         self._construir_ui()
         self.wait_window()
@@ -779,16 +811,19 @@ class VentanaRevision(tk.Toplevel):
                   foreground="gray").pack(side="left", padx=12)
 
         # Eventos matplotlib
-        self._fig.canvas.mpl_connect("motion_notify_event", self._on_move)
-        self._fig.canvas.mpl_connect("button_press_event",  self._on_click_mpl)
-        self._fig.canvas.mpl_connect("scroll_event",        self._on_scroll)
+        self._fig.canvas.mpl_connect("motion_notify_event",  self._on_move)
+        self._fig.canvas.mpl_connect("button_press_event",   self._on_click_mpl)
+        self._fig.canvas.mpl_connect("button_release_event", self._on_release_mpl)
+        self._fig.canvas.mpl_connect("scroll_event",         self._on_scroll)
 
         # Teclas tkinter
-        self.bind("<Delete>",    self._on_delete)
-        self.bind("<BackSpace>", self._on_delete)
-        self.bind("<Escape>",    self._on_escape)
-        self.bind("<n>",         lambda e: self._activar_dibujo())
-        self.bind("<N>",         lambda e: self._activar_dibujo())
+        self.bind("<Delete>",          self._on_delete)
+        self.bind("<BackSpace>",        self._on_delete)
+        self.bind("<Escape>",           self._on_escape)
+        self.bind("<n>",                lambda e: self._activar_dibujo())
+        self.bind("<N>",                lambda e: self._activar_dibujo())
+        self.bind("<KeyPress-space>",   self._on_space_press)
+        self.bind("<KeyRelease-space>", self._on_space_release)
 
     # ------------------------------------------------------------------
     def _activar_dibujo(self):
@@ -820,7 +855,39 @@ class VentanaRevision(tk.Toplevel):
         self._fig.canvas.draw_idle()
 
     # ------------------------------------------------------------------
+    # --- Pan con espacio + arrastre ---
+    def _on_space_press(self, event):
+        self._space_held = True
+        self._cv.get_tk_widget().config(cursor="fleur")
+
+    def _on_space_release(self, event):
+        self._space_held = False
+        self._panning    = False
+        self._pan_px     = None
+        cursor = "arrow" if not self._modo_dibujo else "crosshair"
+        self._cv.get_tk_widget().config(cursor=cursor)
+
+    def _on_release_mpl(self, event):
+        if self._panning:
+            self._panning = False
+            self._pan_px  = None
+
+    # ------------------------------------------------------------------
     def _on_move(self, event):
+        # Pan
+        if self._panning and self._pan_px is not None and event.x is not None:
+            dpx = self._pan_px[0] - event.x
+            dpy = self._pan_px[1] - event.y
+            inv = self._ax.transData.inverted()
+            p0  = inv.transform((0, 0))
+            p1  = inv.transform((dpx, dpy))
+            dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+            self._ax.set_xlim([x + dx for x in self._ax.get_xlim()])
+            self._ax.set_ylim([y + dy for y in self._ax.get_ylim()])
+            self._pan_px = (event.x, event.y)
+            self._fig.canvas.draw_idle()
+            return
+
         if not self._modo_dibujo or event.inaxes != self._ax:
             return
         if event.xdata is None:
@@ -832,6 +899,12 @@ class VentanaRevision(tk.Toplevel):
             self._fig.canvas.draw_idle()
 
     def _on_click_mpl(self, event):
+        # Iniciar pan si espacio está presionado
+        if self._space_held and event.button == 1:
+            self._panning = True
+            self._pan_px  = (event.x, event.y)
+            return
+
         if event.inaxes != self._ax or event.xdata is None or event.button != 1:
             return
 
